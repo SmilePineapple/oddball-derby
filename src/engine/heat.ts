@@ -1,0 +1,214 @@
+import type { CardId, Entrant, GameEvent, HeatCore, HeatState, RacerId, TurnState } from './types';
+import { ChainHalt, Ctx, HeatOver, Pause, type MainMoveInfo } from './ctx';
+import { FINISH } from './tracks';
+import { rollDie } from './rng';
+
+const freshTurn = (): TurnState => ({ mod: 0, floor: 0, flags: {}, usedTurn: {}, spaceHit: {}, effects: 0 });
+
+export function createHeat(o: {
+  racers: { racerId: RacerId; ownerId: number }[];
+  trackId: string;
+  heatNumber?: number;
+  seed: number;
+  deck: CardId[];
+  names: Record<number, string>;
+}): HeatState {
+  const entrants: Entrant[] = o.racers.map((r, id) => ({
+    id,
+    racerId: r.racerId,
+    abilityId: r.racerId,
+    ownerId: r.ownerId,
+    space: 0,
+    dazed: false,
+    status: 'racing',
+    counters: {},
+    usedHeat: false,
+  }));
+  const core: HeatCore = {
+    trackId: o.trackId,
+    heatNumber: o.heatNumber ?? 1,
+    entrants,
+    order: entrants.map((e) => e.id),
+    active: 0,
+    turnCount: 0,
+    placings: [],
+    activeCards: [],
+    deck: [...o.deck],
+    spaceState: { eventUsed: {}, starTaken: {}, marbles: {} },
+    starsEarned: {},
+    names: o.names,
+    rng: o.seed | 0,
+    forcedDice: [],
+    silenceLeft: 0,
+    turn: freshTurn(),
+    over: false,
+  };
+  return { core, base: structuredClone(core), answers: [], emitted: 0, choice: null };
+}
+
+function mainMove(ctx: Ctx, a: Entrant): void {
+  const h = ctx.h;
+  const t = h.turn;
+  const ab = ctx.ability(a);
+
+  // --- roll ---
+  type RollMode = 'one' | 'sum' | 'high' | 'low';
+  let mode: RollMode = 'one';
+  if (ctx.card('doubledice')) mode = 'low';
+  else if (t.flags.ignite) mode = 'sum';
+  else if (ab?.dice === 'high') mode = 'high';
+  const dice = mode === 'one' ? [rollDie(h)] : [rollDie(h), rollDie(h)];
+  ctx.emit('roll', `${ctx.label(a)} rolls ${dice.join(' and ')}.`, { id: a.id, dice: [...dice] });
+
+  ctx.hook('onDiceRolled', a, dice);
+  ctx.emit('dice', '', { id: a.id, dice: [...dice] });
+  ctx.hook('onDiceFinal', a, dice);
+  if (a.status !== 'racing') return;
+
+  // --- compute ---
+  const face = (d: number) => {
+    let f = d;
+    if (ctx.card('headwind') && f === 6) f = 4;
+    if (ab?.dieFace) f = ab.dieFace(f);
+    return f;
+  };
+  const faces = dice.map(face);
+  const rollValue =
+    mode === 'one' ? faces[0] : mode === 'sum' ? faces[0] + faces[1] : mode === 'high' ? Math.max(...faces) : Math.min(...faces);
+  const doubles = dice.length === 2 && dice[0] === dice[1];
+  const crash = mode === 'sum' && doubles;
+  if (mode === 'high' && doubles) t.flags.dizzy = 1;
+
+  let value = ab?.setValue ? ab.setValue(rollValue, ctx) : rollValue;
+  let dir: 1 | -1 = 1;
+  if (ctx.card('mirror')) {
+    if (value % 2 === 1) dir = -1;
+    else value *= 2;
+  }
+  ab?.onCompute?.(ctx, a, rollValue);
+  if (ctx.card('tailwind')) t.mod += 1;
+  const dist = crash ? 0 : Math.max(t.floor, value + t.mod);
+
+  // --- move ---
+  const from = a.space;
+  const startSpaces: Record<number, number> = {};
+  for (const e of h.entrants) startSpaces[e.id] = e.space;
+  ctx.shift(a, dir * dist);
+  if (ab?.bounce && a.space !== from) {
+    while (a.space < FINISH && ctx.others(a).some((o) => o.space === a.space)) a.space++;
+  }
+  const to = a.space;
+  const lo = Math.min(from, to);
+  const hi = Math.max(from, to);
+  const passed = ctx.others(a).filter((o) => o.space > lo && o.space < hi).map((o) => o.id);
+  const info: MainMoveInfo = { mover: a.id, from, to, dist, dir, dice, passed, startSpaces, finished: to >= FINISH };
+
+  if (crash) {
+    ctx.emit('crash', `${ctx.label(a)} rolled doubles and crashes!`, { id: a.id });
+    ctx.daze(a, { kind: 'ability', by: a.id });
+  }
+  ctx.emit(
+    'mainMove',
+    to === from
+      ? `${ctx.label(a)} doesn't move.`
+      : `${ctx.label(a)} moves ${to > from ? 'forward' : 'back'} ${Math.abs(to - from)} to space ${to}.`,
+    { id: a.id, from, to, dist },
+  );
+  if (to < from) ab?.onSelfBack?.(ctx, a);
+  if (to >= FINISH) ctx.finish(a);
+  else if (to !== from) ctx.stopped(a);
+  ctx.hook('afterMainMove', info);
+}
+
+/** Run the active entrant's whole turn. Throws Pause when a player must answer. */
+function runTurn(ctx: Ctx): void {
+  const h = ctx.h;
+  try {
+    if (h.turnCount === 0) ctx.hook('onHeatStart');
+    const a = ctx.active();
+    h.turn = freshTurn();
+    ctx.emit('turnStart', `— ${ctx.label(a)}'s turn${h.names[a.ownerId] ? ` (${h.names[a.ownerId]})` : ''} —`, {
+      id: a.id, ownerId: a.ownerId,
+    });
+    ctx.hook('onTurnStart', a);
+    if (ctx.card('underdog') && ctx.aloneLast(a)) {
+      h.turn.mod += 2;
+      ctx.emit('cardEffect', `Underdog Hour: ${ctx.label(a)} gets +2.`, { id: a.id, cardId: 'underdog' });
+    }
+
+    const wasDazed = a.dazed;
+    const replaced = ctx.ability(a)?.preRoll?.(ctx, a) === true;
+    if (replaced) {
+      // An existing daze is used up; a daze caused by the ability itself stays.
+      if (wasDazed) a.dazed = false;
+    } else if (a.dazed) {
+      ctx.choose(a, 'dazed', `${ctx.label(a)} is dazed and misses this main move.`, ['Continue']);
+      a.dazed = false;
+      ctx.emit('skip', `${ctx.label(a)} is dazed and skips their main move.`, { id: a.id });
+    } else {
+      ctx.choose(a, 'roll', `${ctx.label(a)}: roll!`, ['Roll']);
+      mainMove(ctx, a);
+    }
+  } catch (e) {
+    if (e instanceof HeatOver) {
+      ctx.emit('heatOver', 'The heat is over!', { placings: [...h.placings] });
+      return;
+    }
+    if (e instanceof ChainHalt) ctx.emit('halt', 'The dust settles. (Chain limit reached.)');
+    else throw e;
+  }
+
+  // --- end of turn ---
+  if (ctx.card('silence') && --h.silenceLeft <= 0) {
+    h.activeCards = h.activeCards.filter((c) => c !== 'silence');
+    ctx.emit('cardEnd', 'Silence! is over. Abilities work again.', { cardId: 'silence' });
+  }
+  h.turnCount++;
+  const n = h.order.length;
+  for (let i = 1; i <= n; i++) {
+    const idx = (h.active + i) % n;
+    if (ctx.ent(h.order[idx]).status === 'racing') {
+      h.active = idx;
+      break;
+    }
+  }
+}
+
+/**
+ * Advance the heat until a player must answer or the heat ends.
+ * Pass `answer` (an option index) to resolve the pending choice.
+ * Mutates `hs` and returns the new events since the last call.
+ */
+export function advanceHeat(hs: HeatState, answer?: number): GameEvent[] {
+  if (hs.core.over) throw new Error('The heat is over.');
+  if (answer === undefined && hs.choice) throw new Error('A choice is pending.');
+  if (answer !== undefined) {
+    if (!hs.choice) throw new Error('No choice is pending.');
+    if (!Number.isInteger(answer) || answer < 0 || answer >= hs.choice.options.length) throw new Error('Invalid option.');
+  }
+  let answers = answer === undefined ? hs.answers : [...hs.answers, answer];
+  let skip = hs.emitted;
+  const out: GameEvent[] = [];
+  for (;;) {
+    const core = structuredClone(hs.base);
+    const ctx = new Ctx(core, answers);
+    try {
+      runTurn(ctx);
+    } catch (e) {
+      if (!(e instanceof Pause)) throw e;
+      out.push(...ctx.events.slice(skip));
+      hs.core = core;
+      hs.answers = answers;
+      hs.emitted = ctx.events.length;
+      hs.choice = e.choice;
+      return out;
+    }
+    out.push(...ctx.events.slice(skip));
+    hs.core = core;
+    hs.base = structuredClone(core);
+    hs.answers = answers = [];
+    hs.emitted = skip = 0;
+    hs.choice = null;
+    if (core.over) return out;
+  }
+}
