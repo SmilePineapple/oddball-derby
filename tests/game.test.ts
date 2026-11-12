@@ -1,15 +1,17 @@
 import { createGame, currentPlayer, dispatch, MODES, standings } from '../src/engine/game';
 import { nextRand } from '../src/engine/rng';
-import { botAction } from '../src/engine/ai';
+import { botAction, randomAnswer } from '../src/engine/ai';
+import { trapSpaces, maxBid } from '../src/engine/game';
+import type { Rules } from '../src/engine/types';
 import type { GameState, Mode } from '../src/engine/types';
 
 const people = (n: number) => Array.from({ length: n }, (_, i) => ({ name: `P${i + 1}`, colour: `c${i}` }));
 
 /** Play a whole game with random legal choices. Returns the final state. */
-function playRandom(mode: Mode, n: number, seed: number, beginnerDeal = false): GameState {
+function playRandom(mode: Mode, n: number, seed: number, beginnerDeal = false, rules?: Partial<Rules>): GameState {
   const r = { rng: seed * 7919 + 1 };
   const pick = (k: number) => Math.floor(nextRand(r) * k);
-  let g = createGame({ mode, players: people(n), beginnerDeal, seed });
+  let g = createGame({ mode, players: people(n), beginnerDeal, seed, rules });
   let steps = 0;
   while (g.phase !== 'final') {
     if (++steps > 20000) throw new Error(`Stuck game (mode ${mode}, seed ${seed}, phase ${g.phase})`);
@@ -21,8 +23,13 @@ function playRandom(mode: Mode, n: number, seed: number, beginnerDeal = false): 
       const racerIds: string[] = [];
       for (let i = 0; i < MODES[mode].perHeat; i++) racerIds.push(free.splice(pick(free.length), 1)[0]);
       g = dispatch(g, { type: 'lineupPick', racerIds }).state;
+    } else if (g.phase === 'bids') {
+      g = dispatch(g, { type: 'bid', amount: pick(maxBid(g.players[currentPlayer(g)!]) + 1) }).state;
+    } else if (g.phase === 'traps') {
+      const sp = trapSpaces(g);
+      g = dispatch(g, { type: 'placeTrap', space: sp[pick(sp.length)], kind: pick(2) ? 'boost' : 'mud' }).state;
     } else if (g.phase === 'heat') {
-      g = dispatch(g, { type: 'answer', option: pick(g.heat!.choice!.options.length) }).state;
+      g = dispatch(g, { type: 'answer', option: randomAnswer(g.heat!.choice!, () => nextRand(r)) }).state;
     } else {
       g = dispatch(g, { type: 'nextHeat' }).state;
     }
@@ -132,7 +139,7 @@ describe('full games', () => {
         const p = g.players[currentPlayer(g)!];
         g = dispatch(g, { type: 'lineupPick', racerIds: [p.team[0]] }).state;
       } else {
-        g = dispatch(g, { type: 'answer', option: Math.floor(nextRand(r) * g.heat!.choice!.options.length) }).state;
+        g = dispatch(g, { type: 'answer', option: randomAnswer(g.heat!.choice!, () => nextRand(r)) }).state;
       }
     }
     g = dispatch(g, { type: 'nextHeat' }).state;
@@ -173,7 +180,10 @@ describe('soak: random full games never crash or stall', () => {
   for (const [mode, n] of cases) {
     it(`${mode} with ${n} players × ${GAMES}`, () => {
       for (let seed = 1; seed <= GAMES; seed++) {
-        const g = playRandom(mode, n, seed, seed % 2 === 0);
+        // Every third game switches on a random mix of house rules.
+        const on = (k: number) => seed % 3 === 0 && ((seed >> k) & 1) === 1;
+        const rules: Partial<Rules> = { move: seed % 3 ? 'dice' : (['dice', 'cards', 'choice'] as const)[seed % 9 / 3 | 0], duels: on(1), boosts: on(2), traps: on(3), sprint: on(4), bidding: on(5), forks: seed % 3 === 0 };
+        const g = playRandom(mode, n, seed, seed % 2 === 0, rules);
         expect(g.phase).toBe('final');
         expect(g.history).toHaveLength(4);
       }
@@ -195,7 +205,8 @@ describe('computer players', () => {
     it('plays whole ' + mode + ' games with ' + n + ' computers, always legally', () => {
       for (let seed = 1; seed <= 40; seed++) {
         const r = { rng: seed };
-        let g = createGame({ mode, players: bots(n), beginnerDeal: seed % 2 === 0, seed });
+        const all: Partial<Rules> = seed % 2 ? {} : { move: seed % 4 ? 'choice' : 'cards', duels: true, boosts: true, traps: true, sprint: true, bidding: true, forks: true };
+        let g = createGame({ mode, players: bots(n), beginnerDeal: seed % 2 === 0, seed, rules: all });
         let steps = 0;
         while (g.phase !== 'final') {
           if (++steps > 20000) throw new Error('stuck');

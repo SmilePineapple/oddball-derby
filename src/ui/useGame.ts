@@ -69,7 +69,7 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 export function useGame(playing = true) {
   const [game, setGame] = useState<GameState | null>(() => {
     const g = load<GameState | null>(SAVE, null);
-    return g && g.version === 2 ? g : null;
+    return g && g.version === 3 ? g : null;
   });
   const [view, setView] = useState<View | null>(() => (game?.heat ? viewFromCore(game.heat.core) : null));
   const [log, setLog] = useState<string[]>(() => game?.log ?? []);
@@ -111,6 +111,13 @@ export function useGame(playing = true) {
           await w(250);
           break;
         case 'roll':
+          if (ev.card) {
+            // A move card is shown, not rolled.
+            sfx.ability();
+            patch({ dice: ev.dice as number[], rolling: false });
+            await w(350);
+            break;
+          }
           sfx.roll();
           patch({ dice: ev.dice as number[], rolling: true });
           await w(650);
@@ -122,14 +129,14 @@ export function useGame(playing = true) {
           break;
         case 'mainMove':
         case 'bonusMove': {
-          const from = ev.from as number;
-          const to = ev.to as number;
-          const n = Math.abs(to - from);
-          const dir = to > from ? 1 : -1;
+          // The engine lists every space visited, so shortcuts animate correctly.
+          const steps = (ev.path as number[] | undefined) ?? [];
+          const forward = (ev.to as number) >= (ev.from as number);
+          const n = steps.length;
           const ms = n > 8 ? 70 : 130;
-          for (let i = 1; i <= n; i++) {
-            setSpace(id, from + dir * i);
-            if (anim) (dir > 0 ? sfx.step : sfx.back)();
+          for (const s of steps) {
+            setSpace(id, s);
+            if (anim) (forward ? sfx.step : sfx.back)();
             await w(ms);
           }
           await w(n ? 180 : 350);
@@ -196,6 +203,24 @@ export function useGame(playing = true) {
           setView((v) => (v ? { ...v, gone: { ...v.gone, [id]: 'out' }, banner: ev.text } : v));
           await w(1200);
           patch({ banner: null });
+          break;
+        case 'boost':
+          sfx.ability();
+          say(id, '⚡ Boost +2!', 'good');
+          await w(700);
+          break;
+        case 'sprint':
+          say(id, `Sprint +${ev.bonus}!`, 'good');
+          await w(700);
+          break;
+        case 'fork':
+          say(id, 'Shortcut!', 'good');
+          await w(600);
+          break;
+        case 'duel':
+          sfx.ability();
+          say(id, 'Wins the duel!', 'good');
+          await w(900);
           break;
         case 'heatOver':
           await w(600);

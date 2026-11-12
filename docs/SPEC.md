@@ -329,3 +329,26 @@ Any seat can be handed to the computer at setup, so the game can be played solo.
 - **3D view:** the board is drawn as a tilted table with stand-up racers and scenery, and the camera leans toward the active racer. A button on the race screen switches back to the flat view.
 - **Interaction:** hold the Roll button to shake the dice and let go to throw (Space or Enter also rolls); dashed rings show where each roll of 1–6 would land before abilities and bonuses; reaction buttons throw emoji across the board; hovering a space names it.
 - **Ruling:** Steady Slug's fixed 3 is an odd roll, so under Mirror Day she always moves backward.
+
+---
+
+## 13. House rules
+
+Seven optional rules, chosen at setup (`Rules` in `src/engine/types.ts`). With all of them off the game plays exactly as described above. Tests are in `tests/houserules.test.ts`.
+
+| Rule | What it does |
+|---|---|
+| **Move cards** | `dice`: roll every turn. `choice`: each turn, roll or play a move card 1–6; each card is used once per heat. `cards`: no dice; the hand of 1–6 refills when all six are used. A played card counts as the roll for abilities. |
+| **Space duels** | A main move that ends on another player's racer starts a reaction duel. The loser moves back 1. |
+| **Boost tokens** | Three per player for the whole Grand Prix. Spend one before a main move for +2. |
+| **Timing sprint** | Once per heat each racer may play a timing meter before moving, for +0 to +3. |
+| **Secret tiles** | Before each heat every player secretly places one boost or mud tile on an empty space. Revealed at the start. If two players choose the same space, the first stands. |
+| **Bid to start** | From the second heat, players secretly bid up to 3 stars. The highest bidder pays and starts. Ties go to the earlier seat in turn order. |
+| **Shortcuts** | Loop-de-Lagoon (7 → 12) and Haunted Hairpins (3 → 7) gain a shortcut whose spaces are hazards. A main move that reaches the entrance with steps to spare chooses a route. Bonus moves always take the long way. |
+
+How the engine handles them:
+
+- The main-move prompt becomes a single `move` choice. Its answer is a number: the card played (0 for a roll), plus 100 if boosting, plus 1000 × (sprint bonus + 1) if sprinting.
+- Duel and sprint results are reported by the UI as answers, so a saved game still replays exactly.
+- Shortcut spaces have ids between the two ends (for example 8.5), so "ahead" and "behind" still compare as numbers.
+- Bidding and tile placement are their own phases between line-ups and the heat.

@@ -1,5 +1,5 @@
 import { advanceHeat, createHeat } from '../src/engine/heat';
-import type { CardId, HeatCore, HeatState } from '../src/engine/types';
+import type { CardId, HeatCore, HeatState, Rules } from '../src/engine/types';
 
 export interface Opts {
   spaces?: number[];
@@ -8,6 +8,9 @@ export interface Opts {
   cards?: CardId[];
   deck?: CardId[];
   tweak?: (c: HeatCore) => void;
+  rules?: Partial<Rules>;
+  boosts?: Record<number, number>;
+  extra?: Record<number, 'boost' | 'mud'>;
 }
 
 /**
@@ -21,6 +24,9 @@ export function mk(racers: string[], o: Opts = {}): HeatState {
     seed: 1,
     deck: o.deck ?? [],
     names: {},
+    rules: o.rules,
+    boosts: o.boosts,
+    extra: o.extra,
   });
   const c = hs.base;
   o.spaces?.forEach((s, i) => (c.entrants[i].space = s));

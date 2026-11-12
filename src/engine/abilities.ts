@@ -67,7 +67,7 @@ export const ABILITIES: Record<string, Ability> = {
   mole: {
     afterMainMove(ctx, self, info) {
       if (info.mover !== self.id) return;
-      const targets = ctx.others(self).filter((o) => o.space - self.space === 1 || o.space - self.space === 2);
+      const targets = ctx.others(self).filter((o) => o.space > self.space && o.space - self.space <= 2);
       if (!targets.length) return;
       activate(ctx, self, 'pulls nearby racers back.');
       for (const t of targets) ctx.bonusMove(t, -1, by(self));

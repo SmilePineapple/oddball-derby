@@ -1,8 +1,8 @@
 import type { ReactNode } from 'react';
 import { motion } from 'framer-motion';
 import type { HeatCore, Player } from '../engine/types';
-import { FINISH, TRACKS } from '../engine/tracks';
-import { LAYOUTS } from './trackLayout';
+import { FINISH, TRACKS, type SpaceDef } from '../engine/tracks';
+import { FORK_PTS, LAYOUTS, ptOf } from './trackLayout';
 import { SPACE_STYLE, THEMES } from './art';
 import { INK, Mascot } from './Mascot';
 import type { View } from './useGame';
@@ -150,7 +150,7 @@ export function Track({
   const pos = (id: number): [number, number] => {
     const s = view.spaces[id];
     const g = groups[s] ?? [id];
-    const [x, y] = L.pts[Math.min(FINISH, Math.max(0, s))];
+    const [x, y] = ptOf(core.trackId, s);
     const i = g.indexOf(id);
     const k = g.length;
     const spread = k > 4 ? 15 : 21;
@@ -163,7 +163,8 @@ export function Track({
   // The camera leans toward whoever is moving.
   const focus = view.activeId !== null && view.gone[view.activeId] !== 'out' ? pos(view.activeId) : [500, 320];
   const cam = tilt ? [((500 - focus[0]) / 1000) * 12, ((320 - focus[1]) / 640) * 10 - 9] : [0, 0];
-  const previewSpace = previewFor !== null ? view.spaces[previewFor] : null;
+  const previewAt = previewFor !== null ? view.spaces[previewFor] : null;
+  const previewSpace = previewAt !== null && Number.isInteger(previewAt) ? previewAt : null;
 
   return (
     <div className="w-full h-full flex items-center justify-center" style={{ containerType: 'size' }}>
@@ -210,9 +211,37 @@ export function Track({
                 );
               })}
 
+              {/* shortcut (house rule) */}
+              {core.rules.forks && T.fork && (() => {
+                const f = T.fork;
+                const fp = FORK_PTS[core.trackId] ?? {};
+                const chain = [L.pts[f.from], ...f.nodes.map((n) => fp[n]), L.pts[f.to]];
+                const d = 'M' + chain.map((p) => `${p[0]},${p[1]}`).join(' L');
+                return (
+                  <g>
+                    <path d={d} fill="none" stroke={INK} strokeWidth="56" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d={d} fill="none" stroke="#ffe08a" strokeWidth="42" strokeLinecap="round" strokeLinejoin="round" />
+                    <path className="dash-flow" d={d} fill="none" stroke={INK} strokeWidth="3" strokeDasharray="8 18" opacity="0.45" />
+                    {f.nodes.map((n) => {
+                      const st = SPACE_STYLE[T.forkSpaces[n].type];
+                      const [x, y] = fp[n];
+                      return (
+                        <g key={n}>
+                          <title>{`Shortcut. ${st.label}: ${st.help}`}</title>
+                          <circle cx={x + 2} cy={y + 4} r="24" fill={INK} opacity="0.35" />
+                          <circle cx={x} cy={y} r="24" fill={st.fill} stroke={INK} strokeWidth="3.5" />
+                          <text x={x} y={y + 1} fontSize="26" fontFamily="'Lilita One', sans-serif" textAnchor="middle" dominantBaseline="central" fill={INK}>{st.icon}</text>
+                        </g>
+                      );
+                    })}
+                  </g>
+                );
+              })()}
+
               {/* spaces */}
               {L.pts.map(([x, y], i) => {
-                const def = T.spaces[i];
+                const placed = core.extra[i];
+                const def: SpaceDef | undefined = placed ? { type: placed } : T.spaces[i];
                 const st = def ? SPACE_STYLE[def.type] : null;
                 const used = (def?.type === 'event' && core.spaceState.eventUsed[i]) || (def?.type === 'star' && core.spaceState.starTaken[i]);
                 if (i === FINISH) {

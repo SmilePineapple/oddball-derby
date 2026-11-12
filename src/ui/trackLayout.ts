@@ -1,4 +1,4 @@
-import { FINISH } from '../engine/tracks';
+import { FINISH, TRACKS } from '../engine/tracks';
 
 type P = [number, number];
 
@@ -90,3 +90,22 @@ export const LAYOUTS: Record<string, Layout> = {
   ),
   plain: build(line([60, 320], [940, 320])),
 };
+
+/** Positions of shortcut spaces, spread evenly between the two ends of the shortcut. */
+export const FORK_PTS: Record<string, Record<number, P>> = {};
+for (const [id, t] of Object.entries(TRACKS)) {
+  if (!t.fork || !LAYOUTS[id]) continue;
+  const a = LAYOUTS[id].pts[t.fork.from];
+  const b = LAYOUTS[id].pts[t.fork.to];
+  const n = t.fork.nodes.length;
+  FORK_PTS[id] = {};
+  t.fork.nodes.forEach((node, i) => {
+    const k = (i + 1) / (n + 1);
+    FORK_PTS[id][node] = [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k];
+  });
+}
+
+/** Board position of any space, including shortcut spaces. */
+export function ptOf(trackId: string, space: number): P {
+  return FORK_PTS[trackId]?.[space] ?? LAYOUTS[trackId].pts[Math.min(FINISH, Math.max(0, Math.round(space)))];
+}

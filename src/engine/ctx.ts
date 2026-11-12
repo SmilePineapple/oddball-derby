@@ -1,8 +1,8 @@
-import type { Choice, Entrant, GameEvent, HeatCore } from './types';
+import type { Choice, Entrant, GameEvent, HeatCore, MoveOptions } from './types';
 import { RACERS } from './racers';
 import { ABILITIES, type Ability } from './abilities';
 import { CARDS } from './cards';
-import { FINISH, TRACKS } from './tracks';
+import { FINISH, TRACKS, nextSpace, prevSpace, type SpaceDef, type TrackDef } from './tracks';
 
 /** Thrown when the engine needs a player's answer before it can continue. */
 export class Pause {
@@ -33,6 +33,9 @@ type HookName = {
   [K in keyof Ability]-?: NonNullable<Ability[K]> extends (...a: any[]) => any ? K : never;
 }[keyof Ability];
 
+/** How a space is named in the log. */
+export const spaceName = (s: number) => (Number.isInteger(s) ? `space ${s}` : 'the shortcut');
+
 /**
  * All heat state changes go through this class. Triggers resolve depth-first
  * in priority order: active racer, other racers in turn order, track space.
@@ -44,6 +47,9 @@ export class Ctx {
   constructor(public h: HeatCore, private answers: number[]) {}
 
   // ---------- lookups ----------
+  get track(): TrackDef {
+    return TRACKS[this.h.trackId];
+  }
   ent(id: number): Entrant {
     return this.h.entrants[id];
   }
@@ -78,6 +84,13 @@ export class Ctx {
   immune(target: Entrant, src: Src): boolean {
     return src.kind === 'ability' && src.by !== target.id && !!this.ability(target)?.immune;
   }
+  /** What is on a space: a player's tile, a shortcut hazard, or the track's own space. */
+  spaceDef(space: number): SpaceDef | undefined {
+    const placed = this.h.extra[space];
+    if (placed) return { type: placed };
+    if (!Number.isInteger(space)) return this.track.forkSpaces[space];
+    return this.track.spaces[space];
+  }
 
   // ---------- plumbing ----------
   emit(t: string, text: string, data: Record<string, unknown> = {}): void {
@@ -85,13 +98,31 @@ export class Ctx {
   }
 
   /** Ask a player something. Replays a stored answer or pauses the engine. */
-  choose(e: Entrant, kind: Choice['kind'], prompt: string, options: string[]): number {
+  choose(e: Entrant, kind: Choice['kind'], prompt: string, options: string[], extra: Partial<Choice> = {}): number {
     if (this.answerIndex < this.answers.length) {
       const a = this.answers[this.answerIndex++];
       if (!Number.isInteger(a) || a < 0 || a >= options.length) throw new Error(`Invalid option ${a} for "${prompt}"`);
       return a;
     }
-    throw new Pause({ entrantId: e.id, playerId: e.ownerId, kind, prompt, options });
+    throw new Pause({ entrantId: e.id, playerId: e.ownerId, kind, prompt, options, ...extra });
+  }
+
+  /** Ask how the active racer makes its main move: roll or card, with optional boost and sprint. */
+  chooseMove(e: Entrant, mv: MoveOptions): { card: number; boost: boolean; sprint: number } {
+    if (this.answerIndex < this.answers.length) {
+      const n = this.answers[this.answerIndex++];
+      const card = n % 100;
+      const boost = Math.floor(n / 100) % 10;
+      const sprint = Math.floor(n / 1000);
+      const ok =
+        Number.isInteger(n) && n >= 0 &&
+        (card === 0 ? mv.canRoll : mv.cards.includes(card)) &&
+        (boost === 0 || (boost === 1 && mv.boosts > 0)) &&
+        (sprint === 0 || (mv.sprint && sprint <= 4));
+      if (!ok) throw new Error(`Invalid move ${n}`);
+      return { card, boost: boost === 1, sprint };
+    }
+    throw new Pause({ entrantId: e.id, playerId: e.ownerId, kind: 'move', prompt: `${this.label(e)}: your move!`, options: ['Roll'], move: mv });
   }
 
   hook<K extends HookName>(name: K, ...args: unknown[]): void {
@@ -106,11 +137,43 @@ export class Ctx {
   }
 
   // ---------- movement ----------
-  /** Raw position change, clamped to the track. Returns the signed distance moved. */
-  shift(e: Entrant, delta: number): number {
-    const from = e.space;
-    e.space = Math.min(FINISH, Math.max(0, from + delta));
-    return e.space - from;
+  /** Where `steps` forward from `from` would end. */
+  ahead(from: number, steps: number, short: boolean): number {
+    let s = from;
+    for (let i = 0; i < steps && s < FINISH; i++) s = nextSpace(this.track, s, short);
+    return s;
+  }
+
+  /**
+   * Step along the track. Returns the spaces visited, in order.
+   * With `mayFork`, the owner is asked which way to go at a shortcut.
+   */
+  walk(e: Entrant, steps: number, dir: 1 | -1, mayFork = false): number[] {
+    const path: number[] = [];
+    const fork = this.h.rules.forks ? this.track.fork : undefined;
+    let short = false;
+    for (let i = 0; i < steps; i++) {
+      if (dir > 0) {
+        if (e.space >= FINISH) break;
+        if (mayFork && fork && e.space === fork.from) {
+          const left = steps - i;
+          const long = this.ahead(e.space, left, false);
+          const cut = this.ahead(e.space, left, true);
+          const a = this.choose(e, 'fork', `${this.label(e)} reaches the shortcut with ${left} to go. Which way?`, [
+            `Long way (to ${spaceName(long)})`,
+            `Shortcut (to ${spaceName(cut)})`,
+          ], { fork: { long, short: cut } });
+          short = a === 1;
+          if (short) this.emit('fork', `${this.label(e)} takes the shortcut!`, { id: e.id });
+        }
+        e.space = nextSpace(this.track, e.space, short);
+      } else {
+        if (e.space <= 0) break;
+        e.space = prevSpace(this.track, e.space);
+      }
+      path.push(e.space);
+    }
+    return path;
   }
 
   bonusMove(target: Entrant, delta: number, src: Src): number {
@@ -121,15 +184,16 @@ export class Ctx {
     }
     this.countEffect();
     const from = target.space;
-    const moved = this.shift(target, delta);
-    if (moved === 0) return 0;
-    this.emit('bonusMove', `${this.label(target)} moves ${moved > 0 ? 'forward' : 'back'} ${Math.abs(moved)}.`, {
-      id: target.id, from, to: target.space,
+    const dir = delta > 0 ? 1 : -1;
+    const path = this.walk(target, Math.abs(delta), dir);
+    if (!path.length) return 0;
+    this.emit('bonusMove', `${this.label(target)} moves ${dir > 0 ? 'forward' : 'back'} ${path.length}.`, {
+      id: target.id, from, to: target.space, path,
     });
-    if (moved < 0) this.ability(target)?.onSelfBack?.(this, target);
+    if (dir < 0) this.ability(target)?.onSelfBack?.(this, target);
     this.arrive(target);
-    if (src.kind === 'ability' && moved > 0) this.hook('onAbilityForward', src.by, target);
-    return moved;
+    if (src.kind === 'ability' && dir > 0) this.hook('onAbilityForward', src.by, target);
+    return path.length * dir;
   }
 
   teleport(target: Entrant, to: number, src: Src): boolean {
@@ -140,8 +204,11 @@ export class Ctx {
     }
     this.countEffect();
     const from = target.space;
-    target.space = Math.min(FINISH, Math.max(0, to));
-    this.emit('teleport', `${this.label(target)} teleports to space ${target.space}.`, { id: target.id, from, to: target.space });
+    let dest = Math.min(FINISH, Math.max(0, to));
+    const onShortcut = this.h.rules.forks && !!this.track.fork?.nodes.includes(dest);
+    if (!Number.isInteger(dest) && !onShortcut) dest = Math.floor(dest);
+    target.space = dest;
+    this.emit('teleport', `${this.label(target)} teleports to ${spaceName(dest)}.`, { id: target.id, from, to: dest });
     this.arrive(target);
     return true;
   }
@@ -183,7 +250,7 @@ export class Ctx {
   }
 
   private spaceEffect(e: Entrant, space: number): void {
-    const def = TRACKS[this.h.trackId].spaces[space];
+    const def = this.spaceDef(space);
     const st = this.h.spaceState;
     if (!def || this.h.turn.spaceHit[e.id]) return;
     if (def.type === 'event' && (st.eventUsed[space] || this.h.deck.length === 0)) return;

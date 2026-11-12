@@ -3,7 +3,8 @@ import { motion } from 'framer-motion';
 import { MODES, type GameConfig } from '../engine/game';
 import { RACER_LIST } from '../engine/racers';
 import { TRACKS, TRACK_IDS } from '../engine/tracks';
-import type { Mode } from '../engine/types';
+import type { Mode, Rules } from '../engine/types';
+import { DEFAULT_RULES } from '../engine/heat';
 import { PLAYER_COLOURS } from './art';
 import { Modal, PlayerTag, Presence, Stars } from './bits';
 import { Mascot } from './Mascot';
@@ -16,6 +17,19 @@ const MODE_INFO: Record<Mode, { title: string; sub: string; n: string }> = {
   trioDoubles: { title: 'Trio Doubles', sub: '8 racers each, 2 per heat', n: '3' },
 };
 
+const MOVE_INFO: { v: Rules['move']; t: string; s: string }[] = [
+  { v: 'dice', t: 'Dice', s: 'Roll every turn. The classic game.' },
+  { v: 'choice', t: 'Dice or cards', s: 'Each turn, roll or play a card. Each card 1–6 can be used once per heat.' },
+  { v: 'cards', t: 'Cards only', s: 'No dice. Play cards 1–6; they come back once all six are used.' },
+];
+const RULE_INFO: { k: Exclude<keyof Rules, 'move'>; t: string; s: string }[] = [
+  { k: 'duels', t: 'Space duels', s: 'Land on a rival and it is a reaction duel. The loser moves back 1.' },
+  { k: 'boosts', t: 'Boost tokens', s: 'Three per player for the whole game. Spend one for +2.' },
+  { k: 'sprint', t: 'Timing sprint', s: 'Once per heat, stop the needle for up to +3.' },
+  { k: 'traps', t: 'Secret tiles', s: 'Before each heat, everyone hides one boost or mud tile on the track.' },
+  { k: 'bidding', t: 'Bid to start', s: 'Secretly bid stars to go first in each heat.' },
+  { k: 'forks', t: 'Shortcuts', s: 'Two tracks get a risky shortcut: Loop-de-Lagoon and Haunted Hairpins.' },
+];
 const BOT_NAMES = ['Bolt', 'Gizmo', 'Widget', 'Sprocket', 'Beep', 'Clank'];
 const LETTER_COLOURS = ['#ff5d4a', '#ffc83d', '#17b8a6', '#4aa8ff', '#ff8fb5', '#8b5cf6', '#5ad66f'];
 
@@ -153,6 +167,7 @@ export function Setup({ api, onBack, onStart }: { api: GameApi; onBack: () => vo
   const [deal, setDeal] = useState(false);
   const [bots, setBots] = useState<boolean[]>([false, false, false, false, false, false]);
   const [tracks, setTracks] = useState<string[]>(TRACK_IDS);
+  const [rules, setRules] = useState<Rules>(DEFAULT_RULES);
   const m = MODES[mode];
   const n = Math.min(m.max, Math.max(m.min, count));
 
@@ -174,6 +189,7 @@ export function Setup({ api, onBack, onStart }: { api: GameApi; onBack: () => vo
       beginnerDeal: deal,
       seed: (Date.now() ^ Math.floor(Math.random() * 1e9)) | 0,
       tracks,
+      rules,
     };
     api.newGame(cfg);
     onStart();
@@ -263,6 +279,30 @@ export function Setup({ api, onBack, onStart }: { api: GameApi; onBack: () => vo
               </button>
             );
           })}
+        </div>
+      </Step>
+
+      <Step n={5} title="House rules">
+        <p className="font-bold opacity-75 -mt-2 mb-3">Optional extras that add decisions and skill. Leave them off for the classic game.</p>
+        <div className="display text-lg mb-2">How do racers move?</div>
+        <div className="grid sm:grid-cols-3 gap-4 mb-4">
+          {MOVE_INFO.map((o) => (
+            <button key={o.v} onClick={() => setRules({ ...rules, move: o.v })} className={`card pick p-3 text-left ${rules.move === o.v ? 'on' : ''}`}>
+              <div className="display text-xl">{o.t}</div>
+              <div className="text-sm font-bold opacity-75 leading-snug">{o.s}</div>
+            </button>
+          ))}
+        </div>
+        <div className="grid sm:grid-cols-2 gap-4">
+          {RULE_INFO.map((o) => (
+            <button key={o.k} onClick={() => setRules({ ...rules, [o.k]: !rules[o.k] })} className={`card pick p-3 text-left flex items-center gap-3 ${rules[o.k] ? 'on' : ''}`}>
+              <div className="flex-1">
+                <div className="display text-xl">{o.t}</div>
+                <div className="text-sm font-bold opacity-75 leading-snug">{o.s}</div>
+              </div>
+              <span className="chip" style={{ background: rules[o.k] ? 'var(--green)' : '#e2dccb', fontSize: 13 }}>{rules[o.k] ? 'ON' : 'OFF'}</span>
+            </button>
+          ))}
         </div>
       </Step>
 

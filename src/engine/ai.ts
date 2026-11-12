@@ -1,5 +1,6 @@
-import type { Action, GameState, HeatState } from './types';
-import { currentPlayer, MODES } from './game';
+import type { Action, Choice, GameState, HeatState } from './types';
+import { currentPlayer, maxBid, MODES, trapSpaces } from './game';
+import { FINISH, TRACKS } from './tracks';
 
 /**
  * Computer players. They only use what a human could see: the board, the
@@ -15,13 +16,71 @@ const RATING: Record<string, number> = {
 
 const numbers = (labels: string[]) => labels.map((l) => Number(/(\d+)/.exec(l)?.[1] ?? NaN));
 
+/** A uniformly random legal answer to any choice. Used by tests and as a fallback. */
+export function randomAnswer(choice: Choice, rand: () => number): number {
+  if (choice.kind !== 'move') return Math.floor(rand() * choice.options.length);
+  const mv = choice.move!;
+  const bases = [...(mv.canRoll ? [0] : []), ...mv.cards];
+  let n = bases[Math.floor(rand() * bases.length)];
+  if (mv.boosts > 0 && rand() < 0.3) n += 100;
+  if (mv.sprint && rand() < 0.3) n += 1000 * (1 + Math.floor(rand() * 4));
+  return n;
+}
+
+/** How good it is to stop on a space, in spaces gained. */
+function landing(hs: HeatState, from: number, steps: number): number {
+  const core = hs.core;
+  const to = Math.min(FINISH, from + steps);
+  if (to >= FINISH) return steps + 10;
+  const placed = core.extra[to];
+  const def = placed ? { type: placed } : TRACKS[core.trackId].spaces[to];
+  if (!def) return steps;
+  switch (def.type) {
+    case 'boost': return steps + 2;
+    case 'mud': return steps - 2;
+    case 'web': return steps - 3;
+    case 'star': return steps + (core.spaceState.starTaken[to] ? 0 : 3);
+    case 'spring': return steps + ((def as { to: number }).to - to);
+    default: return steps;
+  }
+}
+
+function chooseMove(hs: HeatState, rand: () => number): number {
+  const choice = hs.choice!;
+  const mv = choice.move!;
+  const core = hs.core;
+  const self = core.entrants[choice.entrantId];
+  const toGo = FINISH - self.space;
+
+  // Card or dice. A die is worth 3.5 on average.
+  let base = 0;
+  if (mv.cards.length) {
+    let best = mv.cards[0];
+    for (const c of mv.cards) if (landing(hs, self.space, c) > landing(hs, self.space, best)) best = c;
+    const value = landing(hs, self.space, best);
+    // With a choice, save cards for when they beat the dice clearly. Cards-only must play one.
+    if (!mv.canRoll || value >= 5) base = best;
+  }
+  let n = base;
+  // Boost tokens and the sprint are saved for the run-in.
+  if (mv.boosts > 0 && (toGo <= 10 || rand() < 0.1)) n += 100;
+  if (mv.sprint && (self.space >= 10 || rand() < 0.15)) n += 1000 * (1 + [0, 1, 1, 2, 2, 3][Math.floor(rand() * 6)]);
+  return n;
+}
+
 function chooseOption(hs: HeatState, playerId: number, rand: () => number): number {
   const choice = hs.choice!;
   const n = choice.options.length;
+  if (choice.kind === 'move') return chooseMove(hs, rand);
+  if (choice.kind === 'duel') return rand() < 0.5 ? 0 : 1;
+  if (choice.kind === 'fork') {
+    // Take the shortcut when it ends past the hazards and further on than the long way.
+    const f = choice.fork!;
+    return Number.isInteger(f.short) && f.short > f.long ? 1 : 0;
+  }
   if (n === 1) return 0;
   const core = hs.core;
   const self = core.entrants[choice.entrantId];
-  const random = () => Math.floor(rand() * n);
 
   switch (self.abilityId) {
     case 'granny': // two dice average 5.8 even after crashes, against 3.5
@@ -56,14 +115,23 @@ function chooseOption(hs: HeatState, playerId: number, rand: () => number): numb
       return high >= 5 ? dice.indexOf(high) + 1 : 0;
     }
     default:
-      return random();
+      return Math.floor(rand() * n);
   }
+}
+
+/** True if a human needs to play this duel on screen. */
+export function duelNeedsHuman(g: GameState): boolean {
+  const c = g.heat?.choice;
+  if (g.phase !== 'heat' || !c || c.kind !== 'duel' || !c.duel) return false;
+  const core = g.heat!.core;
+  return !g.players[core.entrants[c.duel.a].ownerId].bot || !g.players[core.entrants[c.duel.b].ownerId].bot;
 }
 
 /** The action a computer player takes now, or null if it is not a computer's move. */
 export function botAction(g: GameState, rand: () => number = Math.random): Action | null {
   const pid = currentPlayer(g);
   if (pid === null || !g.players[pid].bot) return null;
+  const p = g.players[pid];
 
   if (g.phase === 'draft' && g.draft) {
     let best = g.draft.pool[0];
@@ -78,13 +146,21 @@ export function botAction(g: GameState, rand: () => number = Math.random): Actio
     return { type: 'draftPick', racerId: best };
   }
   if (g.phase === 'lineup') {
-    const p = g.players[pid];
     const free = p.team.filter((r) => !p.used.includes(r));
     const racerIds: string[] = [];
     for (let i = 0; i < MODES[g.mode].perHeat; i++) racerIds.push(free.splice(Math.floor(rand() * free.length), 1)[0]);
     return { type: 'lineupPick', racerIds };
   }
+  if (g.phase === 'bids') {
+    // Going first is worth a little, so bid a single star now and then.
+    return { type: 'bid', amount: maxBid(p) >= 1 && p.stars >= 3 && rand() < 0.35 ? 1 : 0 };
+  }
+  if (g.phase === 'traps') {
+    const spaces = trapSpaces(g);
+    return { type: 'placeTrap', space: spaces[Math.floor(rand() * spaces.length)], kind: rand() < 0.5 ? 'boost' : 'mud' };
+  }
   if (g.phase === 'heat' && g.heat?.choice) {
+    if (duelNeedsHuman(g)) return null;
     return { type: 'answer', option: chooseOption(g.heat, pid, rand) };
   }
   return null;

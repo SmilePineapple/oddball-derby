@@ -39,3 +39,16 @@ describe('track layouts', () => {
     });
   }
 });
+
+describe('shortcut layouts', () => {
+  it('shortcut spaces do not overlap any other space', async () => {
+    const { FORK_PTS } = await import('../src/ui/trackLayout');
+    expect(Object.keys(FORK_PTS).sort()).toEqual(['hairpins', 'lagoon']);
+    for (const [id, nodes] of Object.entries(FORK_PTS)) {
+      const all = [...LAYOUTS[id].pts, ...Object.values(nodes)];
+      for (const p of Object.values(nodes)) {
+        for (const q of all) if (q !== p) expect(Math.hypot(p[0] - q[0], p[1] - q[1])).toBeGreaterThan(48);
+      }
+    }
+  });
+});

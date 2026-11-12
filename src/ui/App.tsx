@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Menu, SettingsRows, Setup } from './Menu';
 import { Draft, Lineup } from './Draft';
 import { Heat } from './Heat';
+import { Bids, Traps } from './Prep';
 import { Final, HeatResults } from './Results';
 import { Rules } from './Rules';
 import { Modal, Presence } from './bits';
@@ -23,6 +24,8 @@ export function App() {
     if (showHeat) screen = <Heat api={api} game={game} onMenu={() => setPause(true)} onRules={() => setRules(true)} />;
     else if (game.phase === 'draft') screen = <Draft api={api} game={game} />;
     else if (game.phase === 'lineup') screen = <Lineup api={api} game={game} />;
+    else if (game.phase === 'bids') screen = <Bids api={api} game={game} />;
+    else if (game.phase === 'traps') screen = <Traps api={api} game={game} />;
     else if (game.phase === 'heatResults') screen = <HeatResults api={api} game={game} />;
     else if (game.phase === 'final') screen = <Final game={game} onDone={() => { api.endGame(); setRoute('menu'); }} />;
   }

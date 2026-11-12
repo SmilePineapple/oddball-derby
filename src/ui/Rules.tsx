@@ -4,7 +4,7 @@ import { CARD_LIST } from '../engine/cards';
 import { Modal, RacerCard } from './bits';
 import { SPACE_STYLE } from './art';
 
-const TABS = ['How to play', 'Racers', 'Event cards', 'Track spaces', 'Words'] as const;
+const TABS = ['How to play', 'House rules', 'Racers', 'Event cards', 'Track spaces', 'Words'] as const;
 
 const TERMS: [string, string][] = [
   ['Main move', 'The dice move a racer makes on its own turn.'],
@@ -42,6 +42,22 @@ export function Rules({ onClose, initial }: { onClose: () => void; initial?: (ty
           <p><b>Heats</b> are run on four tracks drawn from the ones you chose at setup. The player with the fewest stars starts the next heat.</p>
           <p><b>Ties</b> at the end go to the player with more heat wins, then more second places. If still tied, the win is shared.</p>
           <p><b>Two players</b> (Duel) and <b>three-player doubles</b> draft 8 racers each and run 2 per heat.</p>
+        </div>
+      )}
+      {tab === 'House rules' && (
+        <div className="space-y-2">
+          <p className="font-bold opacity-75">Optional rules chosen when you start a game.</p>
+          {[
+            ['Move cards', 'Instead of rolling you may play a move card numbered 1 to 6. In "Dice or cards" each card can be used once per heat. In "Cards only" your cards come back when all six are used. A played card counts as your roll for abilities. Dizzy Dervish and an ignited Jetpack Granny always roll.'],
+            ['Space duels', 'When your main move ends on another player\'s racer, the two of you play a reaction duel. Wait for GO, then tap your side first. Tap early and you lose. The loser moves back 1.'],
+            ['Boost tokens', 'Each player has 3 for the whole Grand Prix. Switch one on before your main move for +2.'],
+            ['Timing sprint', 'Once per heat each racer may sprint before moving. Stop the needle in the middle for +3, close for +2 or +1. A miss still uses it up.'],
+            ['Secret tiles', 'Before each heat every player secretly places one boost or mud tile on an empty space. They are revealed when the race starts. If two players pick the same space, the first one stands.'],
+            ['Bid to start', 'From the second heat, players secretly bid up to 3 stars. The highest bidder pays and starts the heat. Nobody else pays.'],
+            ['Shortcuts', 'Loop-de-Lagoon and Haunted Hairpins gain a shortcut. When your main move reaches its entrance with steps to spare, choose the long way or the shortcut. The shortcut is shorter but its spaces are hazards. Only main moves can take it.'],
+          ].map(([k, v]) => (
+            <div key={k} className="card flat p-3"><div className="display text-lg">{k}</div><div className="text-sm font-bold opacity-90">{v}</div></div>
+          ))}
         </div>
       )}
       {tab === 'Racers' && (

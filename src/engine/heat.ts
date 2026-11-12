@@ -1,7 +1,10 @@
-import type { CardId, Entrant, GameEvent, HeatCore, HeatState, RacerId, TurnState } from './types';
-import { ChainHalt, Ctx, HeatOver, Pause, type MainMoveInfo } from './ctx';
-import { FINISH } from './tracks';
+import type { CardId, Entrant, GameEvent, HeatCore, HeatState, MoveOptions, RacerId, Rules, TurnState } from './types';
+import { ChainHalt, Ctx, HeatOver, Pause, spaceName, type MainMoveInfo } from './ctx';
+import { FINISH, nextSpace } from './tracks';
 import { rollDie } from './rng';
+
+export const DEFAULT_RULES: Rules = { move: 'dice', duels: false, boosts: false, traps: false, sprint: false, bidding: false, forks: false };
+const FULL_HAND = [1, 2, 3, 4, 5, 6];
 
 const freshTurn = (): TurnState => ({ mod: 0, floor: 0, flags: {}, usedTurn: {}, spaceHit: {}, effects: 0 });
 
@@ -12,7 +15,11 @@ export function createHeat(o: {
   seed: number;
   deck: CardId[];
   names: Record<number, string>;
+  rules?: Partial<Rules>;
+  boosts?: Record<number, number>;
+  extra?: Record<number, 'boost' | 'mud'>;
 }): HeatState {
+  const rules = { ...DEFAULT_RULES, ...o.rules };
   const entrants: Entrant[] = o.racers.map((r, id) => ({
     id,
     racerId: r.racerId,
@@ -23,10 +30,13 @@ export function createHeat(o: {
     status: 'racing',
     counters: {},
     usedHeat: false,
+    hand: rules.move === 'dice' ? [] : [...FULL_HAND],
+    sprintUsed: false,
   }));
   const core: HeatCore = {
     trackId: o.trackId,
     heatNumber: o.heatNumber ?? 1,
+    rules,
     entrants,
     order: entrants.map((e) => e.id),
     active: 0,
@@ -35,6 +45,8 @@ export function createHeat(o: {
     activeCards: [],
     deck: [...o.deck],
     spaceState: { eventUsed: {}, starTaken: {}, marbles: {} },
+    extra: { ...o.extra },
+    boosts: { ...o.boosts },
     starsEarned: {},
     names: o.names,
     rng: o.seed | 0,
@@ -46,7 +58,8 @@ export function createHeat(o: {
   return { core, base: structuredClone(core), answers: [], emitted: 0, choice: null };
 }
 
-function mainMove(ctx: Ctx, a: Entrant): void {
+/** @param card a move card played instead of rolling */
+function mainMove(ctx: Ctx, a: Entrant, card?: number): void {
   const h = ctx.h;
   const t = h.turn;
   const ab = ctx.ability(a);
@@ -54,11 +67,14 @@ function mainMove(ctx: Ctx, a: Entrant): void {
   // --- roll ---
   type RollMode = 'one' | 'sum' | 'high' | 'low';
   let mode: RollMode = 'one';
-  if (ctx.card('doubledice')) mode = 'low';
-  else if (t.flags.ignite) mode = 'sum';
-  else if (ab?.dice === 'high') mode = 'high';
-  const dice = mode === 'one' ? [rollDie(h)] : [rollDie(h), rollDie(h)];
-  ctx.emit('roll', `${ctx.label(a)} rolls ${dice.join(' and ')}.`, { id: a.id, dice: [...dice] });
+  if (!card) {
+    if (ctx.card('doubledice')) mode = 'low';
+    else if (t.flags.ignite) mode = 'sum';
+    else if (ab?.dice === 'high') mode = 'high';
+  }
+  const dice = card ? [card] : mode === 'one' ? [rollDie(h)] : [rollDie(h), rollDie(h)];
+  if (card) ctx.emit('roll', `${ctx.label(a)} plays a ${card} card.`, { id: a.id, dice: [...dice], card: true });
+  else ctx.emit('roll', `${ctx.label(a)} rolls ${dice.join(' and ')}.`, { id: a.id, dice: [...dice] });
 
   ctx.hook('onDiceRolled', a, dice);
   ctx.emit('dice', '', { id: a.id, dice: [...dice] });
@@ -93,9 +109,12 @@ function mainMove(ctx: Ctx, a: Entrant): void {
   const from = a.space;
   const startSpaces: Record<number, number> = {};
   for (const e of h.entrants) startSpaces[e.id] = e.space;
-  ctx.shift(a, dir * dist);
+  const path = ctx.walk(a, dist, dir, true);
   if (ab?.bounce && a.space !== from) {
-    while (a.space < FINISH && ctx.others(a).some((o) => o.space === a.space)) a.space++;
+    while (a.space < FINISH && ctx.others(a).some((o) => o.space === a.space)) {
+      a.space = nextSpace(ctx.track, a.space, false);
+      path.push(a.space);
+    }
   }
   const to = a.space;
   const lo = Math.min(from, to);
@@ -111,13 +130,44 @@ function mainMove(ctx: Ctx, a: Entrant): void {
     'mainMove',
     to === from
       ? `${ctx.label(a)} doesn't move.`
-      : `${ctx.label(a)} moves ${to > from ? 'forward' : 'back'} ${Math.abs(to - from)} to space ${to}.`,
-    { id: a.id, from, to, dist },
+      : `${ctx.label(a)} moves ${to > from ? 'forward' : 'back'} ${path.length} to ${spaceName(to)}.`,
+    { id: a.id, from, to, dist, path },
   );
   if (to < from) ab?.onSelfBack?.(ctx, a);
   if (to >= FINISH) ctx.finish(a);
-  else if (to !== from) ctx.stopped(a);
+  else if (to !== from) {
+    ctx.stopped(a);
+    duel(ctx, a);
+  }
   ctx.hook('afterMainMove', info);
+}
+
+/** House rule: a main move that ends on a rival's space starts a duel. The loser moves back 1. */
+function duel(ctx: Ctx, a: Entrant): void {
+  if (!ctx.h.rules.duels || a.status !== 'racing') return;
+  const rival = ctx.others(a).find((o) => o.space === a.space && o.ownerId !== a.ownerId);
+  if (!rival) return;
+  ctx.emit('duelStart', `Duel! ${ctx.label(a)} against ${ctx.label(rival)}.`, { a: a.id, b: rival.id });
+  const won = ctx.choose(a, 'duel', `Duel: ${ctx.label(a)} against ${ctx.label(rival)}`, [`${ctx.label(a)} wins`, `${ctx.label(rival)} wins`], {
+    duel: { a: a.id, b: rival.id },
+  });
+  const winner = won === 0 ? a : rival;
+  const loser = won === 0 ? rival : a;
+  ctx.emit('duel', `${ctx.label(winner)} wins the duel!`, { id: winner.id, loser: loser.id });
+  ctx.bonusMove(loser, -1, { kind: 'card' });
+}
+
+/** What the active racer may do for its main move under the house rules. */
+function moveOptions(ctx: Ctx, a: Entrant): MoveOptions {
+  const { rules, turn, boosts } = ctx.h;
+  const cardsAllowed = rules.move !== 'dice' && !turn.flags.ignite && ctx.ability(a)?.dice !== 'high' && !ctx.card('doubledice');
+  const cards = cardsAllowed ? [...a.hand].sort() : [];
+  return {
+    canRoll: rules.move !== 'cards' || cards.length === 0,
+    cards,
+    boosts: rules.boosts ? boosts[a.ownerId] ?? 0 : 0,
+    sprint: rules.sprint && !a.sprintUsed,
+  };
 }
 
 /** Run the active entrant's whole turn. Throws Pause when a player must answer. */
@@ -146,8 +196,28 @@ function runTurn(ctx: Ctx): void {
       a.dazed = false;
       ctx.emit('skip', `${ctx.label(a)} is dazed and skips their main move.`, { id: a.id });
     } else {
-      ctx.choose(a, 'roll', `${ctx.label(a)}: roll!`, ['Roll']);
-      mainMove(ctx, a);
+      const mv = moveOptions(ctx, a);
+      if (!mv.cards.length && !mv.boosts && !mv.sprint) {
+        ctx.choose(a, 'roll', `${ctx.label(a)}: roll!`, ['Roll']);
+        mainMove(ctx, a);
+      } else {
+        const m = ctx.chooseMove(a, mv);
+        if (m.boost) {
+          h.boosts[a.ownerId]--;
+          h.turn.mod += 2;
+          ctx.emit('boost', `${h.names[a.ownerId] ?? ctx.label(a)} spends a boost token: +2.`, { id: a.id, ownerId: a.ownerId });
+        }
+        if (m.sprint) {
+          a.sprintUsed = true;
+          h.turn.mod += m.sprint - 1;
+          ctx.emit('sprint', `${ctx.label(a)} sprints: +${m.sprint - 1}.`, { id: a.id, bonus: m.sprint - 1 });
+        }
+        if (m.card) {
+          a.hand = a.hand.filter((c) => c !== m.card);
+          if (h.rules.move === 'cards' && !a.hand.length) a.hand = [...FULL_HAND];
+        }
+        mainMove(ctx, a, m.card || undefined);
+      }
     }
   } catch (e) {
     if (e instanceof HeatOver) {
@@ -176,7 +246,7 @@ function runTurn(ctx: Ctx): void {
 
 /**
  * Advance the heat until a player must answer or the heat ends.
- * Pass `answer` (an option index) to resolve the pending choice.
+ * Pass `answer` to resolve the pending choice (see Choice.kind for its meaning).
  * Mutates `hs` and returns the new events since the last call.
  */
 export function advanceHeat(hs: HeatState, answer?: number): GameEvent[] {
@@ -184,7 +254,8 @@ export function advanceHeat(hs: HeatState, answer?: number): GameEvent[] {
   if (answer === undefined && hs.choice) throw new Error('A choice is pending.');
   if (answer !== undefined) {
     if (!hs.choice) throw new Error('No choice is pending.');
-    if (!Number.isInteger(answer) || answer < 0 || answer >= hs.choice.options.length) throw new Error('Invalid option.');
+    const outOfRange = hs.choice.kind !== 'move' && answer >= hs.choice.options.length;
+    if (!Number.isInteger(answer) || answer < 0 || outOfRange) throw new Error('Invalid option.');
   }
   let answers = answer === undefined ? hs.answers : [...hs.answers, answer];
   let skip = hs.emitted;
